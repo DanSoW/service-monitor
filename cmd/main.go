@@ -1,15 +1,49 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/joho/godotenv"
 	"github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/writer"
 	"github.com/spf13/viper"
+	"github.com/xuri/excelize/v2"
 )
 
 func main() {
+	/*exKernel := excel_analysis.NewExccelAnalysis("./config/client_secret.json", "1MjTmlm-4Inf4u0kluKfuCcrSRId1CPbLVHTLGr3lFRU")
+	data, _ := exKernel.GetHeaderInfo()
+	dataStr, _ := json.Marshal(data)
+	fmt.Println(string(dataStr))*/
+
+	file, err := excelize.OpenFile("ServerTable.xlsx")
+	if err != nil {
+		logrus.Fatal(err.Error())
+		return
+	}
+
+	defer func() {
+		if err := file.Close(); err != nil {
+			{
+				fmt.Println(err)
+			}
+		}
+	}()
+
+	rows, err := file.GetRows("Sheet1")
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	for _, row := range rows {
+		for _, colCell := range row {
+			fmt.Print(colCell, "\t")
+		}
+
+		fmt.Println()
+	}
+
 	if err := initConfig(); err != nil {
 		logrus.Fatalf("Ошибка при инициализации файла конфигурации: %s", err.Error())
 	}

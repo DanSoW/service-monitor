@@ -1,49 +1,45 @@
 package excel_analysis
 
 import (
-	"context"
 	"fmt"
-	"io/ioutil"
 	"reflect"
 
 	model "service-monitor/pkg/model"
 
+	"github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 	"github.com/xuri/excelize/v2"
-	"golang.org/x/oauth2/google"
-	"gopkg.in/Iwark/spreadsheet.v2"
 )
 
 /* Тип предиката для сравнения каждой ячейки таблицы с определённым значением */
 type PredicatType func(value string, row, column int) bool
 
 /* Интерфейс для ядра анализа Excel-таблиц */
-type IExAnalysisKernel interface {
+type IExcelAnalysis interface {
 	CopyTo(filePath string) (bool, error)
-	GetSheet() (*spreadsheet.Sheet, error)
+	GetSheet() (*excelize.File, error)
 	GetHeaderInfo() (model.HeaderInfoModel, error)
-	GetIndexByValue(value string, sheet *spreadsheet.Sheet) (model.IndexCellModel, error)
-	GetIndexNextRow(index model.IndexCellModel, sheet *spreadsheet.Sheet, predicat PredicatType) (model.IndexCellModel, error)
-	GetIndexNextRowOffset(index model.IndexCellModel, sheet *spreadsheet.Sheet, offset int, predicat PredicatType) (model.IndexCellModel, error)
-	GetLengthCells(index model.IndexCellModel, sheet *spreadsheet.Sheet, predicat PredicatType) int
-	GetValueCells(data *model.HeaderInfoModel, sheet *spreadsheet.Sheet, index model.IndexCellModel, place string) model.IndexCellModel
+	GetIndexByValue(value string, sheet *excelize.File) (model.IndexCellModel, error)
+	GetIndexNextRow(index model.IndexCellModel, sheet *excelize.File, predicat PredicatType) (model.IndexCellModel, error)
+	GetIndexNextRowOffset(index model.IndexCellModel, sheet *excelize.File, offset int, predicat PredicatType) (model.IndexCellModel, error)
+	GetLengthCells(index model.IndexCellModel, sheet *excelize.File, predicat PredicatType) int
+	GetValueCells(data *model.HeaderInfoModel, sheet *excelize.File, index model.IndexCellModel, place string) model.IndexCellModel
 }
 
 /* Структура основного ядра анализа Excel-таблиц */
-type ExAnalysisKernel struct {
-	ClientSecretPath string
-	DocumentId       string
+type ExcelAnalysis struct {
+	Filepath string
 }
 
 /* Функция создания нового экземпляра ExAnalysisKernel */
-func NewExAnalysisKernel(clientSecretPath, documentId string) *ExAnalysisKernel {
-	return &ExAnalysisKernel{
-		ClientSecretPath: clientSecretPath,
-		DocumentId:       documentId,
+func NewExccelAnalysis(filepath string) *ExcelAnalysis {
+	return &ExcelAnalysis{
+		Filepath: filepath,
 	}
 }
 
 /* Получение длины ячеек начиная с определённого индекса */
-func (k *ExAnalysisKernel) GetLengthCells(index model.IndexCellModel, sheet *spreadsheet.Sheet, predicat PredicatType) int {
+func (k *ExcelAnalysis) GetLengthCells(index model.IndexCellModel, sheet *excelize.File, predicat PredicatType) int {
 	if sheet == nil {
 		var err error
 		if sheet, err = k.GetSheet(); err != nil {
@@ -54,9 +50,14 @@ func (k *ExAnalysisKernel) GetLengthCells(index model.IndexCellModel, sheet *spr
 	var result int
 	result = 0
 
-	for i := index.Row; i < len(sheet.Rows); i++ {
-		cell := sheet.Rows[i][index.Column]
-		if predicat(cell.Value, i, index.Column) {
+	rows, err := sheet.GetRows(viper.GetString("table.sheet"))
+	if err != nil {
+		return 0
+	}
+
+	for i := index.Row; i < len(rows); i++ {
+		cell := rows[i][index.Column]
+		if predicat(cell, i, index.Column) {
 			result++
 		} else {
 			break
@@ -67,7 +68,7 @@ func (k *ExAnalysisKernel) GetLengthCells(index model.IndexCellModel, sheet *spr
 }
 
 /* Получение подробной информации о ячейки в таблице по её значению */
-func (k *ExAnalysisKernel) GetIndexByValue(value string, sheet *spreadsheet.Sheet) (model.IndexCellModel, error) {
+func (k *ExcelAnalysis) GetIndexByValue(value string, sheet *excelize.File) (model.IndexCellModel, error) {
 	if sheet == nil {
 		var err error
 		if sheet, err = k.GetSheet(); err != nil {
@@ -76,15 +77,23 @@ func (k *ExAnalysisKernel) GetIndexByValue(value string, sheet *spreadsheet.Shee
 	}
 
 	var result model.IndexCellModel
+	rows, err := sheet.GetRows(viper.GetString("table.sheet"))
+	if err != nil {
+		return model.IndexCellModel{}, err
+	}
 
-	for rInd, row := range sheet.Rows {
+	for rInd, row := range rows {
 		for cInd, cell := range row {
-			if cell.Value == value {
+			if cell == value {
+				pos, err := excelize.CoordinatesToCellName(rInd, cInd)
+				if err != nil {
+					return model.IndexCellModel{}, err
+				}
 				result = model.IndexCellModel{
-					Pos:    cell.Pos(),
+					Pos:    pos,
 					Row:    rInd,
 					Column: cInd,
-					Value:  cell.Value,
+					Value:  cell,
 				}
 				break
 			}
@@ -95,7 +104,7 @@ func (k *ExAnalysisKernel) GetIndexByValue(value string, sheet *spreadsheet.Shee
 }
 
 /* Получение следующей строки, которая удовлетворяет некоторому условию, определённому в предикате */
-func (k *ExAnalysisKernel) GetIndexNextRowOffset(index model.IndexCellModel, sheet *spreadsheet.Sheet, offset int, predicat PredicatType) (model.IndexCellModel, error) {
+func (k *ExcelAnalysis) GetIndexNextRowOffset(index model.IndexCellModel, sheet *excelize.File, offset int, predicat PredicatType) (model.IndexCellModel, error) {
 	if sheet == nil {
 		var err error
 		if sheet, err = k.GetSheet(); err != nil {
@@ -104,14 +113,24 @@ func (k *ExAnalysisKernel) GetIndexNextRowOffset(index model.IndexCellModel, she
 	}
 
 	var result model.IndexCellModel
-	for i := (index.Row + offset); i < len(sheet.Rows); i++ {
-		cell := sheet.Rows[i][index.Column]
-		if predicat(cell.Value, i, index.Column) {
+	rows, err := sheet.GetRows(viper.GetString("table.sheet"))
+	if err != nil {
+		return model.IndexCellModel{}, err
+	}
+
+	for i := (index.Row + offset); i < len(rows); i++ {
+		cell := rows[i][index.Column]
+		if predicat(cell, i, index.Column) {
+			pos, err := excelize.CoordinatesToCellName(i, index.Column)
+			if err != nil {
+				return model.IndexCellModel{}, err
+			}
+
 			result = model.IndexCellModel{
-				Pos:    cell.Pos(),
+				Pos:    pos,
 				Row:    i,
 				Column: index.Column,
-				Value:  cell.Value,
+				Value:  cell,
 			}
 			break
 		}
@@ -121,7 +140,7 @@ func (k *ExAnalysisKernel) GetIndexNextRowOffset(index model.IndexCellModel, she
 }
 
 /* Получение следующей строки, которая удовлетворяет некоторому условию, определённому в предикате */
-func (k *ExAnalysisKernel) GetIndexNextRow(index model.IndexCellModel, sheet *spreadsheet.Sheet, predicat PredicatType) (model.IndexCellModel, error) {
+func (k *ExcelAnalysis) GetIndexNextRow(index model.IndexCellModel, sheet *excelize.File, predicat PredicatType) (model.IndexCellModel, error) {
 	if sheet == nil {
 		var err error
 		if sheet, err = k.GetSheet(); err != nil {
@@ -130,14 +149,24 @@ func (k *ExAnalysisKernel) GetIndexNextRow(index model.IndexCellModel, sheet *sp
 	}
 
 	var result model.IndexCellModel
-	for i := index.Row; i < len(sheet.Rows); i++ {
-		cell := sheet.Rows[i][index.Column]
-		if predicat(cell.Value, i, index.Column) {
+	rows, err := sheet.GetRows(viper.GetString("table.sheet"))
+	if err != nil {
+		return model.IndexCellModel{}, err
+	}
+
+	for i := index.Row; i < len(rows); i++ {
+		cell := rows[i][index.Column]
+		if predicat(cell, i, index.Column) {
+			pos, err := excelize.CoordinatesToCellName(i, index.Column)
+			if err != nil {
+				return model.IndexCellModel{}, err
+			}
+
 			result = model.IndexCellModel{
-				Pos:    cell.Pos(),
+				Pos:    pos,
 				Row:    i,
 				Column: index.Column,
-				Value:  cell.Value,
+				Value:  cell,
 			}
 			break
 		}
@@ -146,43 +175,19 @@ func (k *ExAnalysisKernel) GetIndexNextRow(index model.IndexCellModel, sheet *sp
 	return result, nil
 }
 
-/* Получение указателя на объект листа */
-func (k *ExAnalysisKernel) GetSheet() (*spreadsheet.Sheet, error) {
-	// Чтение данных из файла
-	data, err := ioutil.ReadFile(k.ClientSecretPath)
+/* Получение указателя на объект */
+func (k *ExcelAnalysis) GetSheet() (*excelize.File, error) {
+	file, err := excelize.OpenFile(viper.GetString("paths.table"))
 	if err != nil {
+		logrus.Fatal(err.Error())
 		return nil, err
 	}
 
-	// Получение конфигурации JWT из чтинанных ранее данных
-	conf, err := google.JWTConfigFromJSON(data, spreadsheet.Scope)
-	if err != nil {
-		return nil, err
-	}
-
-	// Создание нового клиента работающего в фоновом режиме
-	client := conf.Client(context.Background())
-
-	// Создание нового сервиса spreadsheet с ранее объявленным клиентом
-	service2 := spreadsheet.NewServiceWithClient(client)
-
-	// Получение удалённого доступа к таблице
-	spreadsheet, err := service2.FetchSpreadsheet(k.DocumentId)
-	if err != nil {
-		return nil, err
-	}
-
-	// Получение листа с индексом 0 (первого листа)
-	sheet, err := spreadsheet.SheetByIndex(0)
-	if err != nil {
-		return nil, err
-	}
-
-	return sheet, nil
+	return file, nil
 }
 
 /* Копирование данных из удалённой таблицы в локальную */
-func (k *ExAnalysisKernel) CopyTo(filePath string) (bool, error) {
+func (k *ExcelAnalysis) CopyTo(filePath string) (bool, error) {
 	sheet, err := k.GetSheet()
 	if err != nil {
 		return false, err
@@ -190,11 +195,19 @@ func (k *ExAnalysisKernel) CopyTo(filePath string) (bool, error) {
 
 	// Создание нового файла Excel
 	f := excelize.NewFile()
+	rows, err := sheet.GetRows(viper.GetString("table.sheet"))
+	if err != nil {
+		return false, err
+	}
 
 	// Копирование данных из одной таблицы в другую
-	for _, row := range sheet.Rows {
-		for _, cell := range row {
-			f.SetCellValue("Sheet1", cell.Pos(), cell.Value)
+	for rInd, row := range rows {
+		for cInd, cell := range row {
+			pos, err := excelize.CoordinatesToCellName(rInd, cInd)
+			if err != nil {
+				return false, err
+			}
+			f.SetCellValue(viper.GetString("table.sheet"), pos, cell)
 		}
 	}
 
@@ -207,7 +220,7 @@ func (k *ExAnalysisKernel) CopyTo(filePath string) (bool, error) {
 }
 
 /* Получение информации о ячейках и её загрузка в структуру */
-func (k *ExAnalysisKernel) GetValueCells(data *model.HeaderInfoModel, sheet *spreadsheet.Sheet, index model.IndexCellModel, place string) model.IndexCellModel {
+func (k *ExcelAnalysis) GetValueCells(data *model.HeaderInfoModel, sheet *excelize.File, index model.IndexCellModel, place string) model.IndexCellModel {
 	nextIndex, _ := k.GetIndexNextRowOffset(index, sheet, 1, func(value string, row, column int) bool { return (len(value) > 0) })
 	nextIndex_RC := model.IndexCellModel{
 		Row:    nextIndex.Row,
@@ -223,7 +236,12 @@ func (k *ExAnalysisKernel) GetValueCells(data *model.HeaderInfoModel, sheet *spr
 			return true
 		}
 
-		return (len(sheet.Rows[row][column-1].Value) <= 0)
+		rows, err := sheet.GetRows(viper.GetString("table.sheet"))
+		if err != nil {
+			return false
+		}
+
+		return (len(rows[row][column-1]) <= 0)
 	})
 
 	ps := reflect.ValueOf(data)
@@ -250,7 +268,12 @@ func (k *ExAnalysisKernel) GetValueCells(data *model.HeaderInfoModel, sheet *spr
 				return true
 			}
 
-			return (len(sheet.Rows[row][column-1].Value) <= 0)
+			rows, err := sheet.GetRows(viper.GetString("table.sheet"))
+			if err != nil {
+				return false
+			}
+
+			return (len(rows[row][column-1]) <= 0)
 		})
 
 		if reflectValue.Kind() == reflect.String {
@@ -265,7 +288,7 @@ func (k *ExAnalysisKernel) GetValueCells(data *model.HeaderInfoModel, sheet *spr
 	return nextIndex
 }
 
-func (k *ExAnalysisKernel) GetHeaderInfo() (model.HeaderInfoModel, error) {
+func (k *ExcelAnalysis) GetHeaderInfo() (model.HeaderInfoModel, error) {
 	sheet, err := k.GetSheet()
 	if err != nil {
 		return model.HeaderInfoModel{}, err
